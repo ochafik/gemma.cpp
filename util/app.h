@@ -62,6 +62,7 @@ class AppArgs : public ArgsBase<AppArgs> {
   Path log;  // output
   int verbosity;
   size_t num_threads;
+  bool ascii;
 
   template <class Visitor>
   void ForEach(const Visitor& visitor) {
@@ -76,6 +77,10 @@ class AppArgs : public ArgsBase<AppArgs> {
             "Number of threads to use. Default value is set based on an "
             "estimate of "
             "how many concurrent threads are supported.",
+            2);
+    visitor(ascii, "ascii",
+            false,
+            "Whether to only sample ASCII outputs.",
             2);
   }
 };

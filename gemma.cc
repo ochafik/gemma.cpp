@@ -241,7 +241,8 @@ struct GemmaInterface {
                         hwy::ThreadPool& pool, hwy::ThreadPool& inner_pool,
                         const StreamFunc& stream_token,
                         const AcceptFunc& accept_token, std::mt19937& gen,
-                        int verbosity) = 0;
+                        int verbosity,
+                        const std::vector<int>* token_ids) = 0;
 };
 
 template <class Config>
@@ -261,7 +262,8 @@ struct GemmaImpl : public GemmaInterface {
   void Generate(const InferenceArgs& args, const std::vector<int>& prompt,
                 size_t start_pos, hwy::ThreadPool& pool,
                 hwy::ThreadPool& inner_pool, const StreamFunc& stream_token,
-                const AcceptFunc& accept_token, std::mt19937&, int verbosity);
+                const AcceptFunc& accept_token, std::mt19937&, int verbosity,
+                const std::vector<int>* token_ids);
 
   sentencepiece::SentencePieceProcessor tokenizer;
 
@@ -502,7 +504,8 @@ void GenerateImpl(GemmaImpl<TConfig>& gemma, const InferenceArgs& args,
                   hwy::ThreadPool& pool, hwy::ThreadPool& inner_pool,
                   const StreamFunc& stream_token,
                   const AcceptFunc& accept_token, std::mt19937& gen,
-                  int verbosity) {
+                  int verbosity,
+                  const std::vector<int>* token_ids) {
   static constexpr size_t kModelDim = TConfig::kModelDim;
   static constexpr size_t kVocabSize = TConfig::kVocabSize;
   static constexpr size_t kTopK = TConfig::kTopK;
@@ -579,13 +582,47 @@ void GenerateImpl(GemmaImpl<TConfig>& gemma, const InferenceArgs& args,
     if (pos_offset >= prompt.size()) {
       PROFILER_ZONE("Gen.Embedding");
       // Generation phase
-      MatVec<kVocabSize, kModelDim>(c_weights.c_embedder_input_embedding, 0,
+      if (token_ids) {
+        auto offset = 0;
+#if 0
+        auto n_tokens = token_ids->size();
+        memset(activations.logits.data(), 0, kVocabSize * sizeof(float));
+        for (size_t i = 0; i < n_tokens; i++) {
+          auto id = (*token_ids)[i];
+          const hn::ScalableTag<float> df;
+          detail::FullDotProductsForStrip(df, c_weights.c_embedder_input_embedding, 0, dim_model, id, 1,
+                                          final_activation, activations.logits.data() + id);
+        }
+        // Barrier: must have all logits so we can subtract max.
+        n_tokens = kVocabSize;
+#elif 0
+        auto n_tokens = token_ids->size();
+        for (size_t i = 0; i < n_tokens; i++) {
+          auto id = (*token_ids)[i];
+          const hn::ScalableTag<float> df;
+          detail::FullDotProductsForStrip(df, c_weights.c_embedder_input_embedding, 0, dim_model, id, 1,
+                                          final_activation, activations.logits.data() + id);
+        }
+#else
+        constexpr auto n_tokens = 75000;
+        // constexpr auto n_tokens = 10000;
+        MatVec<kVocabSize, kModelDim>(c_weights.c_embedder_input_embedding, 0,
                                     final_activation, activations.logits.data(),
                                     pool);
-      // Barrier: must have all logits so we can subtract max.
-      Softmax(activations.logits.data(), kVocabSize);
-      token = SampleTopK<kTopK>(activations.logits.data(), kVocabSize, gen,
-                                args.temperature, accept_token);
+#endif
+        // Barrier: must have all logits so we can subtract max.
+        Softmax(activations.logits.data(), n_tokens);
+        token = SampleTopK<kTopK>(activations.logits.data(), n_tokens, gen,
+                                  args.temperature, accept_token);
+      } else {
+        MatVec<kVocabSize, kModelDim>(c_weights.c_embedder_input_embedding, 0,
+                                      final_activation, activations.logits.data(),
+                                      pool);
+        // Barrier: must have all logits so we can subtract max.
+        Softmax(activations.logits.data(), kVocabSize);
+        token = SampleTopK<kTopK>(activations.logits.data(), kVocabSize, gen,
+                                  args.temperature, accept_token);
+      }
     }
     if (!stream_token(token, activations.logits[token])) {
       token = EOS_ID;
@@ -606,18 +643,20 @@ void Generate2B(GemmaImpl<ConfigGemma2B>& gemma, const InferenceArgs& args,
                 const std::vector<int>& prompt, size_t start_pos,
                 hwy::ThreadPool& pool, hwy::ThreadPool& inner_pool,
                 const StreamFunc& stream_token, const AcceptFunc& accept_token,
-                std::mt19937& gen, int verbosity) {
+                std::mt19937& gen, int verbosity,
+                const std::vector<int>* token_ids) {
   GenerateImpl(gemma, args, prompt, start_pos, pool, inner_pool, stream_token,
-               accept_token, gen, verbosity);
+               accept_token, gen, verbosity, token_ids);
 }
 
 void Generate7B(GemmaImpl<ConfigGemma7B>& gemma, const InferenceArgs& args,
                 const std::vector<int>& prompt, size_t start_pos,
                 hwy::ThreadPool& pool, hwy::ThreadPool& inner_pool,
                 const StreamFunc& stream_token, const AcceptFunc& accept_token,
-                std::mt19937& gen, int verbosity) {
+                std::mt19937& gen, int verbosity,
+                const std::vector<int>* token_ids) {
   GenerateImpl(gemma, args, prompt, start_pos, pool, inner_pool, stream_token,
-               accept_token, gen, verbosity);
+               accept_token, gen, verbosity, token_ids);
 }
 
 // Calls func(name, float*, CompressedArray&) for each tensor. float* is null
@@ -749,10 +788,11 @@ void GemmaImpl<ConfigGemma2B>::Generate(const InferenceArgs& args,
                                         hwy::ThreadPool& inner_pool,
                                         const StreamFunc& stream_token,
                                         const AcceptFunc& accept_token,
-                                        std::mt19937& gen, int verbosity) {
+                                        std::mt19937& gen, int verbosity,
+                                        const std::vector<int>* token_ids) {
   HWY_DYNAMIC_DISPATCH(Generate2B)
   (*this, args, prompt, start_pos, pool, inner_pool, stream_token, accept_token,
-   gen, verbosity);
+   gen, verbosity, token_ids);
 }
 template <>
 void GemmaImpl<ConfigGemma7B>::Generate(const InferenceArgs& args,
@@ -761,10 +801,11 @@ void GemmaImpl<ConfigGemma7B>::Generate(const InferenceArgs& args,
                                         hwy::ThreadPool& inner_pool,
                                         const StreamFunc& stream_token,
                                         const AcceptFunc& accept_token,
-                                        std::mt19937& gen, int verbosity) {
+                                        std::mt19937& gen, int verbosity,
+                                        const std::vector<int>* token_ids) {
   HWY_DYNAMIC_DISPATCH(Generate7B)
   (*this, args, prompt, start_pos, pool, inner_pool, stream_token, accept_token,
-   gen, verbosity);
+   gen, verbosity, token_ids);
 }
 
 Gemma::Gemma(const LoaderArgs& args, hwy::ThreadPool& pool) {
@@ -792,10 +833,11 @@ void GenerateGemma(Gemma& gemma, const InferenceArgs& args,
                    hwy::ThreadPool& pool, hwy::ThreadPool& inner_pool,
                    const StreamFunc& stream_token,
                    const AcceptFunc& accept_token, std::mt19937& gen,
-                   int verbosity) {
+                   int verbosity,
+                   const std::vector<int>* token_ids) {
   pool.SetWaitMode(hwy::PoolWaitMode::kSpin);
   gemma.impl_->Generate(args, prompt, start_pos, pool, inner_pool, stream_token,
-                        accept_token, gen, verbosity);
+                        accept_token, gen, verbosity, token_ids);
   pool.SetWaitMode(hwy::PoolWaitMode::kBlock);
 }
 
