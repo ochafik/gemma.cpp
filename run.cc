@@ -79,7 +79,7 @@ void ShowConfig(LoaderArgs& loader, InferenceArgs& inference, AppArgs& app) {
 
 void ReplGemma(gcpp::Gemma& model, hwy::ThreadPool& pool,
                hwy::ThreadPool& inner_pool, const InferenceArgs& args,
-               int verbosity, const gcpp::AcceptFunc& accept_token) {
+               int verbosity, bool ascii, const gcpp::AcceptFunc& accept_token) {
   PROFILER_ZONE("Gen.misc");
   int abs_pos = 0;      // absolute token index over all turns
   int current_pos = 0;  // token index within the current turn
@@ -91,6 +91,38 @@ void ReplGemma(gcpp::Gemma& model, hwy::ThreadPool& pool,
   } else {
     std::random_device rd;
     gen.seed(rd());
+  }
+
+  const std::vector<int> *p_token_ids = nullptr;
+  std::vector<int> token_ids;
+  // CompressedArray<EmbedderInputT, TConfig::vocab_size * TConfig::dim_model>
+  // std::vector<float> truncated_embeddings;
+  // CompressedArray<EmbedderInputT, TConfig::vocab_size * TConfig::dim_model>
+  //     c_embedder_input_embedding;
+  //       Decompress(c_weights.c_embedder_input_embedding, token * dim_model,
+  //                  activations.x.data() + token_idx * dim_model, dim_model);
+  if (ascii) {
+    auto &tokenizer = model.Tokenizer();
+
+    // TODO: move to a predicate
+    for (auto id = 0, n = tokenizer.GetPieceSize(); id < n; id++) {
+      const auto &token = tokenizer.IdToPiece(id);
+      if (!tokenizer.IsControl(id)) {
+        bool keep = true;
+        for (auto i = 0; i < token.size(); i++) {
+          if (token[i] < 0) { // Signed version of >= 128) {
+            keep = false;
+            break;
+          }
+        }
+        if (!keep) {
+          continue;
+        }
+      }
+      token_ids.push_back(id);
+    }
+    std::cerr << std::endl << "# ASCII token ids: " << token_ids.size() << std::endl;
+    p_token_ids = &token_ids;
   }
 
   // callback function invoked for each generated token.
@@ -169,7 +201,7 @@ void ReplGemma(gcpp::Gemma& model, hwy::ThreadPool& pool,
 
     const double time_start = hwy::platform::Now();
     GenerateGemma(model, args, prompt, abs_pos, pool, inner_pool, stream_token,
-                  accept_token, gen, verbosity);
+                  accept_token, gen, verbosity, p_token_ids);
     const double time_end = hwy::platform::Now();
     const double tok_sec = current_pos / (time_end - time_start);
     if (verbosity >= 2) {
@@ -230,7 +262,7 @@ void Run(LoaderArgs& loader, InferenceArgs& inference, AppArgs& app) {
     std::cout << "\n" << instructions << "\n";
   }
 
-  ReplGemma(model, pool, inner_pool, inference, app.verbosity,
+  ReplGemma(model, pool, inner_pool, inference, app.verbosity, app.ascii,
             /*accept_token=*/[](int) { return true; });
 }
 

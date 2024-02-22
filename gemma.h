@@ -198,7 +198,8 @@ void GenerateGemma(Gemma& gemma, const InferenceArgs& args,
                    hwy::ThreadPool& pool, hwy::ThreadPool& inner_pool,
                    const StreamFunc& stream_token,
                    const AcceptFunc& accept_token, std::mt19937& g,
-                   int verbosity);
+                   int verbosity,
+                   const std::vector<int>* token_ids = nullptr);
 
 constexpr int EOS_ID = 1;
 
